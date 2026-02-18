@@ -40,7 +40,7 @@ AKATSUKILINK="https://air_conditioning.akatsuki.gg/loader"
 MAPPINGTOOLSLINK="https://github.com/OliBomby/Mapping_Tools/releases/download/v${MAPPINGTOOLSVERSION}/mapping_tools_installer_x64.exe"
 
 # The URL for our git repo
-WINELLOGIT="https://github.com/NelloKudo/osu-winello.git"
+WINELLOGIT="https://github.com/mezleca/osu-winello.git"
 
 # The directory osu-winello.sh is in
 SCRDIR="$(realpath "$(dirname "$0")")"
@@ -350,43 +350,28 @@ InitialOsuInstall() {
 # - Regedit keys to integrate native file manager with Wine
 # - rpc-bridge for Discord RPC (flatpak users, google "flatpak discord rpc")
 FullInstall() {
-    # Time to install my prepackaged Wineprefix, which works in most cases
-    # The script is still bundled with osu-wine --fixprefix, which should do the job for me as well
-
     mkdir -p "$XDG_DATA_HOME/osuconfig/configs" # make the configs directory and copy the example if it doesnt exist
     [ ! -r "$XDG_DATA_HOME/osuconfig/configs/example.cfg" ] && cp "${SCRDIR}/stuff/example.cfg" "$XDG_DATA_HOME/osuconfig/configs/example.cfg"
 
     Info "Configuring Wineprefix:"
-
-    # Variable to check if download finished properly
-    local failprefix="false"
-    mkdir -p "$XDG_DATA_HOME/wineprefixes"
-    if [ -r "$XDG_DATA_HOME/wineprefixes/osu-wineprefix/system.reg" ]; then
+    mkdir -p "$(dirname "$WINEPREFIX")"
+    if [ -r "$WINEPREFIX/system.reg" ]; then
         Info "Wineprefix already exists; do you want to reinstall it?"
         Warning "HIGHLY RECOMMENDED UNLESS YOU KNOW WHAT YOU'RE DOING!"
         read -r -p "$(Info "Choose (y/N): ")" prefchoice
         if [ "$prefchoice" = 'y' ] || [ "$prefchoice" = 'Y' ]; then
-            rm -rf "$XDG_DATA_HOME/wineprefixes/osu-wineprefix"
+            rm -rf "$WINEPREFIX"
         fi
     fi
 
     # So if there's no prefix (or the user wants to reinstall):
-    if [ ! -r "$XDG_DATA_HOME/wineprefixes/osu-wineprefix/system.reg" ]; then
-        # Downloading prefix in temporary ~/.winellotmp folder
-        # to make up for this issue: https://github.com/NelloKudo/osu-winello/issues/36
-        mkdir -p "$HOME/.winellotmp"
-        DownloadFile "${PREFIXLINK}" "$HOME/.winellotmp/osu-winello-prefix.tar.xz" || Revert
-
-        # Checking whether to create prefix manually or install it from repos
-        if [ "$failprefix" = "true" ]; then
+    if [ ! -r "$WINEPREFIX/system.reg" ]; then
+        if [ "${WINELLO_PREFIX_KIND:-default}" = "custom" ]; then
             reconfigurePrefix nowinepath fresh || Revert
         else
-            tar -xf "$HOME/.winellotmp/osu-winello-prefix.tar.xz" -C "$XDG_DATA_HOME/wineprefixes"
-            mv "$XDG_DATA_HOME/wineprefixes/osu-prefix" "$XDG_DATA_HOME/wineprefixes/osu-wineprefix"
+            installPackagedPrefix || Revert
             reconfigurePrefix nowinepath || Revert
         fi
-        # Cleaning..
-        rm -rf "$HOME/.winellotmp"
     fi
 
     # Now set up desktop files and such, no matter whether its a new or old prefix
@@ -398,6 +383,24 @@ FullInstall() {
     Info "Installation is completed! Run 'osu-wine' to play osu!"
     Warning "If 'osu-wine' doesn't work, just close and relaunch your terminal."
     exit 0
+}
+
+installPackagedPrefix() {
+    local tmp_prefix_dir="$HOME/.winellotmp"
+    local tmp_prefix_tar="$tmp_prefix_dir/osu-winello-prefix.tar.xz"
+    local parent_dir
+    parent_dir="$(dirname "$WINEPREFIX")"
+
+    mkdir -p "$tmp_prefix_dir" "$parent_dir"
+    DownloadFile "${PREFIXLINK}" "$tmp_prefix_tar" || return 1
+
+    rm -rf "$parent_dir/osu-prefix" "$WINEPREFIX"
+    tar -xf "$tmp_prefix_tar" -C "$parent_dir" || return 1
+    [ -d "$parent_dir/osu-prefix" ] || { Error "Prefix archive extraction failed." && return 1; }
+    mv "$parent_dir/osu-prefix" "$WINEPREFIX" || return 1
+
+    rm -rf "$tmp_prefix_dir"
+    return 0
 }
 
 #   =====================================
@@ -516,7 +519,7 @@ reconfigurePrefix() {
         Info "Downloading and installing a new prefix with winetricks. This might take a while, so go make a coffee or something."
         "$WINESERVER" -k
         PATH="${SCRDIR}/stuff:${PATH}" WINEDEBUG="fixme-winediag,${WINEDEBUG:-}" WINENTSYNC=0 WINEESYNC=0 WINEFSYNC=0 \
-            "$WINETRICKS" -q nocrashdialog autostart_winedbg=disabled dotnet48 dotnet20 gdiplus_winxp meiryo dxvk win10 ||
+            "$WINETRICKS" -q nocrashdialog autostart_winedbg=disabled dotnet48 dotnet20 gdiplus_winxp cjkfonts meiryo dxvk win10 ||
             { Error "winetricks failed catastrophically!" && return 1; }
     }
 
@@ -704,7 +707,7 @@ Uninstall() {
     read -r -p "$(Info "Do you want to uninstall Wineprefix? (y/N)")" wineprch
 
     if [ "$wineprch" = 'y' ] || [ "$wineprch" = 'Y' ]; then
-        rm -rf "$XDG_DATA_HOME/wineprefixes/osu-wineprefix"
+        rm -rf "${WINEPREFIX:-"$XDG_DATA_HOME/wineprefixes/osu-wineprefix"}"
     else
         Info "Skipping.."
     fi
@@ -1096,7 +1099,12 @@ case "$1" in
     ;;
 
 'fixprefix')
-    reconfigurePrefix fresh || exit 1
+    if [ "${WINELLO_PREFIX_KIND:-default}" = "custom" ]; then
+        reconfigurePrefix fresh || exit 1
+    else
+        installPackagedPrefix || exit 1
+        reconfigurePrefix || exit 1
+    fi
     ;;
 
 'winecachy-setup')

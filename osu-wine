@@ -26,8 +26,11 @@ set +a
 
 export WINE="${WINE:-$XDG_DATA_HOME/osuconfig/yawl-winello}"
 export WINESERVER="${WINESERVER:-${WINE}server}"
-export WINEPREFIX="${WINEPREFIX:-$XDG_DATA_HOME/wineprefixes/osu-wineprefix}"
+export WINEPREFIX="${WINEPREFIX:-}"
 export WINE_INSTALL_PATH="${WINE_INSTALL_PATH:-$XDG_DATA_HOME/osuconfig/wine-osu}"
+export CUSTOM_WINE_BIN="${CUSTOM_WINE_BIN:-}"
+export CUSTOM_WINESERVER_BIN="${CUSTOM_WINESERVER_BIN:-}"
+export WINELLOGIT="${WINELLOGIT:-https://github.com/mezleca/osu-winello.git}"
 
 export WINETRICKS="${WINETRICKS:-$XDG_DATA_HOME/osuconfig/winetricks}"
 
@@ -47,6 +50,9 @@ PRESSURE_VESSEL_FILESYSTEMS_RW+="${_mainscript_mount:-}${_curdir_mount:-}${_home
 export PRESSURE_VESSEL_FILESYSTEMS_RW="${PRESSURE_VESSEL_FILESYSTEMS_RW//\/:/:}" OSUPATH               # clean any "just /" mounts, pressure-vessel doesn't like that
 
 mapfile -t configs < <(find "$XDG_DATA_HOME/osuconfig/configs" -name '*.cfg')
+
+DEFAULT_PREFIX_TAG="${DEFAULT_PREFIX_TAG:-10.15-4}"
+CACHY_PREFIX_TAG="${CACHY_PREFIX_TAG:-10.0-3}"
 
 ###################################################################################################
 # Helper functions for the launcher script
@@ -85,7 +91,7 @@ Help() {
 
 # Won't return failure if there's no internet connection, but tries to update the main script first before calling the function
 MainScriptUpdate() {
-    _clone() { GIT_TERMINAL_PROMPT=0 git clone "https://github.com/NelloKudo/osu-winello.git" "$XDG_DATA_HOME/osuconfig/update" --quiet 2>/dev/null; }
+    _clone() { GIT_TERMINAL_PROMPT=0 git clone "$WINELLOGIT" "$XDG_DATA_HOME/osuconfig/update" --quiet 2>/dev/null; }
     _pull() { GIT_TERMINAL_PROMPT=0 git -C "$XDG_DATA_HOME/osuconfig/update" pull --quiet 2>/dev/null; }
     _reset() { GIT_TERMINAL_PROMPT=0 git -C "$XDG_DATA_HOME/osuconfig/update" reset --hard "${1:-HEAD}" --quiet 2>/dev/null; }
     if [ ! -d "$XDG_DATA_HOME/osuconfig/update" ]; then
@@ -113,12 +119,73 @@ MainScript() {
     return $? # shouldn't reach this if using exec
 }
 
-# Use wine-osu-cachy when enabled in the configuration file
-if [ "$WINE_USE_CACHY" == "true" ]; then
-    MainScript winecachy-setup
-    export WINE="$XDG_DATA_HOME/osuconfig/yawl-winello-cachy"
-    export WINE_INSTALL_PATH="$XDG_DATA_HOME/osuconfig/wine-osu-cachy-10.0"
-fi
+RealpathOrEcho() {
+    realpath "$1" 2>/dev/null || echo "$1"
+}
+
+ResolveCustomWineserver() {
+    local custom_wine_dir="$1"
+    [ -n "$CUSTOM_WINESERVER_BIN" ] && { echo "$CUSTOM_WINESERVER_BIN"; return 0; }
+    [ -x "${CUSTOM_WINE_BIN}server" ] && { echo "${CUSTOM_WINE_BIN}server"; return 0; }
+    [ -x "$custom_wine_dir/wineserver" ] && { echo "$custom_wine_dir/wineserver"; return 0; }
+    return 1
+}
+
+ConfigureCustomWine() {
+    local resolved_wineserver=""
+    local custom_wine_real=""
+    local custom_wineserver_real=""
+    local custom_wine_dir=""
+
+    [ -n "$CUSTOM_WINE_BIN" ] || return 0
+
+    [ -x "$CUSTOM_WINE_BIN" ] || ErrorAndExit "CUSTOM_WINE_BIN is not executable: '$CUSTOM_WINE_BIN'"
+
+    custom_wine_real="$(RealpathOrEcho "$CUSTOM_WINE_BIN")"
+    custom_wine_dir="$(dirname "$custom_wine_real")"
+    resolved_wineserver="$(ResolveCustomWineserver "$custom_wine_dir")" ||
+        ErrorAndExit "Couldn't find wineserver for CUSTOM_WINE_BIN ('$CUSTOM_WINE_BIN'). Set CUSTOM_WINESERVER_BIN in your cfg."
+    [ -x "$resolved_wineserver" ] ||
+        ErrorAndExit "CUSTOM_WINESERVER_BIN is not executable: '$resolved_wineserver'"
+
+    custom_wineserver_real="$(RealpathOrEcho "$resolved_wineserver")"
+    export WINE="$custom_wine_real"
+    export WINESERVER="$custom_wineserver_real"
+}
+
+PrepareWine() {
+    if [ -n "$CUSTOM_WINE_BIN" ]; then
+        [ "$WINE_USE_CACHY" == "true" ] && Warning "CUSTOM_WINE_BIN is set; ignoring WINE_USE_CACHY."
+        ConfigureCustomWine
+    elif [ "$WINE_USE_CACHY" == "true" ]; then
+        MainScript winecachy-setup
+        export WINE="$XDG_DATA_HOME/osuconfig/yawl-winello-cachy"
+        export WINE_INSTALL_PATH="$XDG_DATA_HOME/osuconfig/wine-osu-cachy-10.0"
+    fi
+}
+
+SelectPrefixMode() {
+    if [ -z "$WINEPREFIX" ]; then
+        if [ -n "$CUSTOM_WINE_BIN" ]; then
+            export WINEPREFIX="$XDG_DATA_HOME/wineprefixes/osu-wineprefix-custom"
+            export WINELLO_PREFIX_KIND="custom"
+        elif [ "$WINE_USE_CACHY" == "true" ]; then
+            export WINEPREFIX="$XDG_DATA_HOME/wineprefixes/osu-wineprefix-cachy-$CACHY_PREFIX_TAG"
+            export WINELLO_PREFIX_KIND="cachy"
+        else
+            export WINEPREFIX="$XDG_DATA_HOME/wineprefixes/osu-wineprefix-$DEFAULT_PREFIX_TAG"
+            export WINELLO_PREFIX_KIND="default"
+        fi
+    elif [ -z "$WINELLO_PREFIX_KIND" ]; then
+        if [ -n "$CUSTOM_WINE_BIN" ]; then
+            export WINELLO_PREFIX_KIND="custom"
+        elif [ "$WINE_USE_CACHY" == "true" ]; then
+            export WINELLO_PREFIX_KIND="cachy"
+        else
+            export WINELLO_PREFIX_KIND="default"
+        fi
+    fi
+}
 
 LaunchOsu() {
     declare -a PRE_ARGS POST_ARGS
@@ -148,7 +215,6 @@ LaunchOsu() {
     Info "The run log is located in ${WINELLO_LOGS_PATH}. Attach this file if you make an issue on GitHub or ask for help on Discord."
     Info "Launching: ${PRE_ARGS[*]} ${WINE} ${OSU_EXE[*]} ${POST_ARGS[*]}"
 
-    export WINEDEBUG="+timestamp,+pid,+tid,+threadname,+debugstr,+loaddll,+winebrowser,+exec${WINEDEBUG:+,${WINEDEBUG}}"
     cd "${OSUPATH}" || { Error "Couldn't change the working directory to your osu! folder... Did you remove it? Try \`osu-wine --changedir\`." && return 1; }
     exec "${PRE_ARGS[@]}" "${WINE}" "${OSU_EXE[@]}" "${POST_ARGS[@]}" &>>"${WINELLO_LOGS_PATH}" || return 1
     return 0
@@ -175,8 +241,8 @@ ErrorAndExit() {
 # Begin argument handling
 ###################################################################################################
 
-# default to MainSciptUpdate, allow overriding from config
-: "${mainscriptcommand:=MainScriptUpdate}"
+# default to MainScript (no auto-update), allow overriding from config
+: "${mainscriptcommand:=MainScript}"
 
 case "$1" in
 'n')
@@ -189,6 +255,15 @@ case "$1" in
 esac
 
 shopt -s extglob
+SelectPrefixMode
+
+case "$1" in
+'--edit-config' | '--info' | '--remove' | *--help*)
+    ;;
+*)
+    PrepareWine
+    ;;
+esac
 
 case "$1" in
 '--devserver')
